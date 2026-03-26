@@ -1,0 +1,472 @@
+You are picking up an in-progress engineering project called ReleaseIQ — an ADP internal release management platform. All code has been written and is being handed to you. Read this entire prompt before doing anything.
+
+
+== PROJECT OVERVIEW ==
+
+ReleaseIQ is a full-stack platform for managing Salesforce and React release certifications, Jira sync, Copado bundle tracking, and team coordination. It consists of two separate repositories:
+
+1. releaseiq-microservice — Node.js + Express + TypeScript REST API
+2. releaseiq-ui — React 18 + Vite + TypeScript frontend
+
+There is also a single-file HTML prototype (ReleaseIQ_v2.html) that represents the full UI vision with dummy data and localStorage simulation — useful as a reference for any UI work.
+
+
+== TECH STACK ==
+
+Microservice:
+- Node.js + Express + TypeScript
+- MongoDB + Mongoose (local install, no Docker)
+- JWT auth + Azure AD MSAL (mock mode for local dev)
+- Winston logging, node-cron, express-rate-limit
+- Environments: LOCAL -> DIT -> FIT -> IAT -> PROD
+
+UI:
+- React 18 + Vite + TypeScript
+- TanStack React Query v5 (server state)
+- Zustand (client/auth state, persisted to localStorage)
+- Axios with JWT interceptor + auto-retry on 502/503/504
+- React Router v6 with lazy loading
+
+
+== MICROSERVICE FILE STRUCTURE ==
+
+src/
+  config/
+    index.ts                   Reads .env.{NODE_ENV} automatically, validates required keys
+    env/
+      .env.local               AUTH_MODE=mock, JIRA_MOCK=true, COPADO_MOCK=true
+      .env.dit                 AUTH_MODE=azure, JIRA_MOCK=true, COPADO_MOCK=true
+      .env.fit                 AUTH_MODE=azure, JIRA_MOCK=false, COPADO_MOCK=false
+      .env.iat                 AUTH_MODE=azure, JIRA_MOCK=false, COPADO_MOCK=false
+      .env.production          AUTH_MODE=azure, all real, secrets via Azure Key Vault
+  middleware/
+    auth.ts                    JWT verify, Azure AD callback, mock login, requireMainAdmin, requireProjectAdmin
+  models/
+    index.ts                   All 9 Mongoose models: User, Project, JiraStory, JiraFixVersion,
+                               CopadoBundle, CertificationSession, AdminRequest, ErrorLog, Activity
+  routes/
+    index.ts                   Central route registration
+    auth.routes.ts             POST /auth/mock-login, POST /auth/azure/callback, GET /auth/me
+    project.routes.ts          CRUD + toggle-live
+    certification.routes.ts    join, defect, verify-story, block, complete, create-jira-issues, resume
+    jira.routes.ts             sync, stories, fix-versions, add-label
+    copado.routes.ts           bundles, sync, test-connection
+    admin.routes.ts            requests CRUD, approve/deny, errors, users, role update
+    activity.routes.ts         GET /activity
+  types/
+    index.ts                   All TypeScript interfaces and enums for the entire app
+  server.ts                    Entry point: all middleware, rate limiting, error handler, graceful shutdown
+  utils/
+    db.ts                      MongoDB connection with 5x retry + exponential backoff
+    logger.ts                  Winston logger (console + optional file)
+    seed.ts                    Full dummy data seed script — run with: npm run seed
+
+
+== UI FILE STRUCTURE ==
+
+src/
+  common/                      ALL reusable atoms/molecules — import from here across all features
+    components/
+      Badge.tsx                Badge, StatusBadge, statusToVariant()
+                               Usage: <StatusBadge status="In Progress" /> auto-colors by status string
+      Button.tsx               Button with variant (primary/secondary/ghost/danger/success/blue),
+                               size (xs/sm/md), loading spinner, fullWidth, leftIcon, rightIcon
+      UI.tsx                   Card, Section, Modal, Spinner, ProgressBar, Metric, EmptyState,
+                               Alert (error/warning/success/info), Divider, Tabs (pills/underline),
+                               Table (generic typed), Field, inputStyle, SecretInput,
+                               EnvCheckGroup, StepPipeline
+    hooks/
+      index.ts                 useToast — call showToast("msg", color) from anywhere without context
+                               useClipboard — { copy, copied } with fallback for old browsers
+                               useDebounce — debounce any value with configurable delay
+                               useTimer — live elapsed seconds from a startedAt timestamp
+                               usePoll — call fn() every N ms while enabled
+                               useLocalStorage — typed localStorage with useState interface
+    utils/
+      index.ts                 fmtDate, fmtDateShort, fmtDateTime, fmtDuration, fmtDurationHuman,
+                               timeAgo, biWeeklyDate, isValidEmail, isStale, initials, slugify,
+                               truncate, healthColor, avatarColor, SEVERITY_TO_PRIORITY,
+                               ROLE_LABELS, ROLE_COLORS, BUNDLE_COLORS, ENV_PIPELINE,
+                               TEAMS, BUSINESS_UNITS
+    types/
+      index.ts                 Re-exports all shared types from services/api — feature components
+                               import types from here, never directly from services/api
+
+  apps/                        Feature-level folders — each has a page and its own sub-components
+    auth/
+      LoginPage.tsx            MockLoginForm (local dev) + AzureLoginForm (prod)
+                               Reads VITE_AUTH_MODE env var to decide which form to show
+    dashboard/
+      HomePage.tsx             Hero stats, quick actions, project grid/list, activity feed
+      components/index.tsx     HeroStats, QuickActions, ProjectTile (tile card with release rows),
+                               ProjectListTable (expandable list view), ActivityFeed
+    certification/
+      CertSessionPage.tsx      The core cert flow:
+                               State 1 — No session: shows JoinForm (name/role/BU/env)
+                               State 2 — In Progress: timer, defect log, story verification, actions
+                               State 3 — Complete: summary, Jira bulk create button
+                               Note: /cert/:sessionId has NO auth guard. UUID is the credential.
+      ActiveSessionsPage.tsx   Release Manager view — shows all sessions for a project.
+                               Auto-polls GET /api/certifications/active every 30 seconds.
+                               Link button copies share URL to resend to testers who lost it.
+                               Force Complete button closes stuck sessions.
+      components/index.tsx     JoinForm (validated, role-aware BU field),
+                               SessionTimer (useTimer hook, live elapsed display),
+                               DefectForm (severity->priority mapping, Jira queue checkbox),
+                               DefectItem (single defect row with badges),
+                               JiraBulkModal (review all queued defects before creating),
+                               SessionCompleteSummary (duration, defect count, Jira status),
+                               ActiveSessionRow (table row with live timer via useTimer)
+    project/
+      ProjectPage.tsx          7 tabs for every project type:
+                               Certification, Bundles+Copado (SF only), Release Plan,
+                               Jira Labels (SF only), Team View (SF only), Defects, Metrics
+      components/index.tsx     BundleCard (collapsible: promotions + Apex results + validation),
+                               CopadoPipelineBar (DEV->SIT->UAT->STG->PROD status overview),
+                               TeamViewPanel (consolidated totals + per-team drill-down with
+                               story-level label fix buttons and Jira deep links),
+                               LabelTable (filter by ready/missing, Fix All button per story)
+    admin/
+      AdminPage.tsx            Two-tier admin: Main Admin (platform) + Project Admin (per project)
+                               Panels: Dashboard, All Projects, Access Requests, Users, Error Log,
+                               per-project config panel, Request Access form, Create Project form
+      components/index.tsx     ProjectAdminPanel (name, label, cadence, admin emails),
+                               CopadoConfigForm (URL, token with show/hide, pipeline, envs,
+                               apex threshold, test connection button),
+                               AccessRequestPanel (submit request form),
+                               CreateProjectPanel (new project wizard),
+                               AdminRequestCard (approve/deny with confirmation),
+                               ErrorLogRow (resolve button, context + message display),
+                               UserRow (role badge, projectAdminOf display)
+
+  layout/
+    Layout.tsx                 Thin shell — renders Sidebar + Header + <Outlet />
+    Sidebar.tsx                Collapsible project nav, sign out, user display at bottom
+                               Projects loaded from React Query cache (queryKey: ['projects'])
+    Header.tsx                 Breadcrumb from location.pathname + ToastContainer
+                               ToastContainer uses useToastProvider hook
+
+  services/
+    api.ts                     Central Axios instance with:
+                               - JWT Bearer header injection from Zustand store
+                               - 401 handler: clears auth, redirects to /login?reason=session_expired
+                               - Retry on 502/503/504 (up to 2x)
+                               - Typed wrappers: authApi, projectApi, certApi, jiraApi,
+                                 copadoApi, adminApi, activityApi
+                               - All shared TypeScript types defined here as interfaces
+
+  store/
+    authStore.ts               Zustand store: { token, user, isAuthenticated }
+                               Persisted to localStorage as 'releaseiq-auth'
+                               setAuth(token, user), logout(), updateUser(user)
+
+  App.tsx                      QueryClient config, BrowserRouter, lazy route loading,
+                               RequireAuth guard, global CSS keyframes injected as <style> tag:
+                               riq-pulse (badge animation), riq-spin (spinner), riq-fadeup (toast/modal)
+  main.tsx                     ReactDOM.createRoot entry point
+
+
+== ROUTES ==
+
+Path                              Component                         Auth
+/login                            apps/auth/LoginPage               Public
+/cert/:sessionId                  apps/certification/CertSessionPage Public — UUID is the credential
+/                                 apps/dashboard/HomePage           JWT required
+/projects/:projectId              apps/project/ProjectPage          JWT required
+/projects/:projectId/sessions     apps/certification/ActiveSessions JWT required
+/admin                            apps/admin/AdminPage              JWT required (admin role)
+
+
+== FULL API ENDPOINT TABLE ==
+
+Method  Endpoint                                          Auth          Description
+POST    /api/auth/mock-login                             None          Local dev — any ADP email
+POST    /api/auth/azure/callback                         None          Production SSO — sends idToken
+GET     /api/auth/me                                     JWT           Current user profile
+POST    /api/auth/logout                                 JWT           Confirm logout (client discards token)
+GET     /api/projects                                    JWT           List all projects
+GET     /api/projects/:id                                JWT           Single project (tokens masked)
+POST    /api/projects                                    Main Admin    Create project
+PATCH   /api/projects/:id                                Project Admin Update settings
+DELETE  /api/projects/:id                                Main Admin    Delete project
+POST    /api/projects/:id/toggle-live                    Project Admin Toggle LIVE status
+GET     /api/certifications/active                       JWT           All in-progress sessions (any project)
+GET     /api/certifications/project/:id                  JWT           Sessions for one project
+GET     /api/certifications/:sessionId                   JWT           Single session by UUID
+GET     /api/certifications/:sessionId/resume            NONE          Resume via share link — no auth
+POST    /api/certifications/join                         JWT           Create or resume session
+PATCH   /api/certifications/:id/defect                   JWT           Add defect to session
+PATCH   /api/certifications/:id/verify-story             JWT           Toggle story verification
+PATCH   /api/certifications/:id/block                    JWT           Mark session blocked
+POST    /api/certifications/:id/complete                 JWT           Complete session
+POST    /api/certifications/:id/create-jira-issues       JWT           Bulk create Jira bugs (mock/real)
+POST    /api/jira/sync/:projectId                        JWT           Trigger Jira sync (mock/real)
+GET     /api/jira/stories/:projectId                     JWT           Get stories from MongoDB cache
+GET     /api/jira/fix-versions/:projectId                JWT           Consolidated + per-team breakdown
+PATCH   /api/jira/story/:id/:key/label                   Project Admin Add label to story
+GET     /api/copado/bundles/:projectId                   JWT           Get bundles from MongoDB
+POST    /api/copado/sync/:projectId                      Project Admin Sync from Copado API
+POST    /api/copado/test-connection                      Project Admin Test Copado credentials
+GET     /api/admin/requests                              Main Admin    List all access requests
+POST    /api/admin/requests                              JWT           Submit access request
+PATCH   /api/admin/requests/:id/approve                  Main Admin    Approve + update user role
+PATCH   /api/admin/requests/:id/deny                     Main Admin    Deny request
+GET     /api/admin/errors                                JWT           Error log (scoped by role)
+DELETE  /api/admin/errors                                Main Admin    Clear error log
+PATCH   /api/admin/errors/:id/resolve                    JWT           Mark error resolved
+GET     /api/admin/users                                 Main Admin    List all users
+PATCH   /api/admin/users/:email/role                     Main Admin    Change user role
+GET     /api/activity                                    JWT           Platform activity feed
+GET     /api/health                                      None          Health check
+
+
+== MONGODB COLLECTIONS ==
+
+User                 email (unique), name, initials, azureOid, role, projectAdminOf[], lastLogin
+Project              projectId (slug), name, type, releaseLabel, jiraKey, copadoConfig{},
+                     isLive, teamCount, adminEmails[], storyCount, doneCount, defectCount,
+                     syncStatus (never/syncing/synced/error/stale), lastJiraSync, lastSyncError
+JiraStory            projectId, releaseVersion, key, title, type, status, team, assignee,
+                     labels[], bundle, hasCopadoCICD, hasReleaseLabel, isBlocker, lastSyncedAt
+JiraFixVersion       projectId, team, versionName, storyCount, doneCount, inProgressCount, todoCount
+CopadoBundle         projectId, releaseVersion, name, bundleNumber, status, deployedAt,
+                     teams[], promotions[]{env,status,promotedAt}, apexResults{}, validationResult{}
+CertificationSession sessionId (UUID), projectId, releaseVersion, certifierName, certifierEmail,
+                     certifierRole, businessUnit, environment, status (In Progress/Complete/Blocked),
+                     startedAt, completedAt, durationSeconds, defects[]{embedded}, defectCount,
+                     verifiedStoryKeys[], jiraIssuesCreated, jiraIssueKeys[]
+AdminRequest         requestId, projectId, projectName, requesterEmail, requesterName, reason,
+                     status (pending/approved/denied), reviewedBy, reviewedAt
+ErrorLog             context, message, stack, projectId, level, resolved, createdAt
+Activity             projectId, type, message, icon, actorEmail, actorName, createdAt
+
+
+== ROLE SYSTEM ==
+
+Role            Access
+main-admin      Full platform: create/delete projects, manage all users, approve requests, all errors
+project-admin   Assigned projects only: configure settings, Copado config, trigger syncs, manage sessions
+user            Read all projects, join cert sessions via share link
+(no auth)       Resume cert session via /cert/:sessionId ONLY — UUID is the credential
+
+
+== AUTH MODES ==
+
+AUTH_MODE=mock (local dev):
+  Any ADP email works via POST /api/auth/mock-login
+  Seeded demo accounts:
+    john.doe@adp.com      -> main-admin
+    jane.smith@adp.com    -> project-admin (ecertify, sf1)
+    tester.bu@adp.com     -> user
+
+AUTH_MODE=azure (DIT/FIT/IAT/PROD):
+  MSAL.js on frontend gets Azure ID token -> POST /api/auth/azure/callback
+  Server decodes token, finds/creates user in MongoDB, issues 8h JWT
+  For production: add JWKS validation with jwks-rsa package (scaffold in docs/CONNECTING_REAL_APIS.md)
+
+JIRA_MOCK=true: All sync calls generate realistic dummy data that mirrors Jira Cloud REST API v3 response shape
+JIRA_MOCK=false: Calls GET {JIRA_BASE_URL}/rest/api/3/search with Basic auth (email:apiToken base64)
+
+COPADO_MOCK=true: All Copado calls return seeded bundle data
+COPADO_MOCK=false: Calls Salesforce Connected App REST endpoints
+
+
+== SEEDED DUMMY DATA ==
+
+Projects:
+  ecertify    E-Certify Salesforce   LIVE    47 stories   3 Copado bundles   8 teams   health 78%
+  sf1         SF1 Commerce Cloud     offline  22 stories   2 Copado bundles   7 teams   health 35%
+  sf2         SF2 Service Cloud      offline  31 stories   1 Copado bundle    7 teams   health 100% Complete
+  abc         ABC React Dashboard    offline  18 stories   no Copado          3 teams   health 60%
+
+Teams: TEAM-A through TEAM-H (8 teams)
+
+Jira stories: 47 stories seeded for ecertify with realistic label distribution (some missing CopadoCICD,
+some missing release label, some with both, assigned across all 8 teams, bundled to Bundle 1/2/3)
+
+Copado bundles for ecertify:
+  Bundle 1 Core Platform   Deployed to PROD   Apex 94%   Teams: A,C,E
+  Bundle 2 BU Features     Deployed to PROD   Apex 91%   Teams: B,D,F
+  Bundle 3 Hotfixes        In Progress UAT    Apex 88%   Teams: G,H
+
+Certification sessions:
+  7 completed sessions (Enterprise, MAS, NAS, Canada, SBS, Tax Direct, QA Lead)
+  2 active in-progress sessions (Chris Davis / Wisely-Wage Pay, QA Regression)
+  These are used to demonstrate the Active Sessions manager page
+
+
+== KEY DESIGN DECISIONS — DO NOT CHANGE WITHOUT REASON ==
+
+1. Cert session UUID = share link credential.
+   /cert/:sessionId has NO auth guard by design. BU testers who may not have Azure AD
+   must be able to land on the join screen. The join form collects their identity.
+   The resume endpoint GET /api/certifications/:sessionId/resume is also unauthenticated.
+
+2. Sessions persist in MongoDB, not in browser state.
+   Closing the browser, navigating away, losing the tab — none of these end a session.
+   The durationSeconds field is recalculated from startedAt on every resume call.
+   The UI useTimer hook re-derives elapsed time from startedAt on mount.
+
+3. Lost cert link recovery flow.
+   ActiveSessionsPage polls GET /api/certifications/active every 30s.
+   The Link button copies window.location.origin + /cert/ + sessionId to clipboard.
+   Release Managers paste this into Slack to resend to testers.
+   Force Complete closes stuck sessions when a tester's window is unrecoverable.
+
+4. Join is idempotent — duplicate sessions are prevented.
+   POST /api/certifications/join checks for an existing In Progress session with the same
+   certifierEmail + projectId + releaseVersion before creating a new one.
+   If found, it returns the existing session with resumed: true.
+
+5. Jira sync is pull-on-demand, served from MongoDB cache.
+   All story reads come from MongoDB (JiraStory collection).
+   No Jira API calls happen during normal read operations.
+   Stale data is served during sync failures — the UI shows a yellow banner.
+   project.syncStatus drives the banner: never / syncing / synced / error / stale
+
+6. Two required Jira labels per story for Copado.
+   Label 1: CopadoCICD — links story to Copado pipeline
+   Label 2: release label (e.g. Salesforce_26.14) — scopes story to this release
+   All 8 teams share the EXACT same release label name.
+   DevOps manually creates Copado bundles from stories that have both labels.
+
+7. Consolidated + drill-down team view.
+   JiraFixVersion stores per-team aggregates (done/inProgress/todo counts).
+   GET /api/jira/fix-versions/:projectId returns consolidated totals + perTeam array.
+   UI shows consolidated by default; each team card expands to individual stories.
+
+8. Error handling pattern for all external API calls.
+   Retry 3 times with exponential backoff: 1s, 2s, 3s.
+   On final failure: set project.syncStatus = error, log to ErrorLog collection, throw.
+   Admin Error Log page shows all failures with resolve button.
+
+9. Secret masking.
+   API tokens are stored in MongoDB but returned to the client as "••••••••".
+   The frontend only sends a new token value if the user types something new.
+   The save handler checks: if value === '••••••••', keep existing DB value.
+
+10. common/ is the import boundary in the UI.
+    Feature components in apps/ import from @/common/components, @/common/hooks,
+    @/common/utils, @/common/types only.
+    They never import from sibling feature folders.
+    This keeps features decoupled and common/ as the single source of truth for UI primitives.
+
+11. Global CSS keyframes are injected once in App.tsx as a <style> tag.
+    riq-pulse  — used on LIVE dot badges and active session indicators
+    riq-spin   — used on Button loading spinner
+    riq-fadeup — used on toasts and modal entrance
+    All inline animation references use these names. Do not rename them.
+
+12. React Query cache keys follow a strict pattern.
+    ['projects']                     — all projects list
+    ['project', projectId]           — single project
+    ['sessions', projectId, status]  — sessions filtered by project + status
+    ['activeSessions', projectId]    — active sessions for ActiveSessionsPage poll
+    ['certSession', sessionId]       — single cert session by UUID
+    ['stories', projectId]           — Jira stories for a project
+    ['fixVersions', projectId]       — fix version aggregates
+    ['bundles', projectId]           — Copado bundles
+    ['adminRequests']                — admin access requests
+    ['errorLogs']                    — error log entries
+    ['allUsers']                     — all users (main admin only)
+    ['activity']                     — platform activity feed
+    Invalidate the correct key after any mutation. Never use a different key for the same data.
+
+
+== LOCAL SETUP (NEW MACHINE) ==
+
+Step 1: Install MongoDB locally (no Docker)
+  macOS: brew tap mongodb/brew && brew install mongodb-community@7.0 && brew services start mongodb-community@7.0
+  Ubuntu: curl + apt install (see docs/SETUP.md for full commands)
+  Verify: mongosh --eval "db.runCommand({ connectionStatus: 1 })"
+
+Step 2: Start the microservice
+  cd releaseiq-microservice
+  cp src/config/env/.env.local .env
+  npm install
+  npm run seed        <- drops and re-seeds all collections with dummy data
+  npm run dev         <- starts on port 4000
+
+Step 3: Start the UI
+  cd releaseiq-ui
+  Create .env.local with:
+    VITE_API_URL=http://localhost:4000/api
+    VITE_AUTH_MODE=mock
+  npm install
+  npm run dev         <- starts on port 3000
+
+Step 4: Open http://localhost:3000
+  Log in with: john.doe@adp.com (Main Admin)
+               jane.smith@adp.com (Project Admin)
+               tester.bu@adp.com (BU Tester)
+
+To reset all data: cd releaseiq-microservice && npm run seed
+
+
+== WHAT IS NOT YET DONE ==
+
+1. ProjectPage Metrics tab — shows a placeholder. Needs real charts using synced Jira data:
+   cert duration trends, defect counts per release, team velocity, Apex coverage history.
+
+2. Azure AD MSAL implementation in LoginPage — the SSO button exists but loginPopup() is not
+   wired. See docs/CONNECTING_REAL_APIS.md section 3 for the exact MSAL code to add.
+
+3. Azure token JWKS validation in auth.ts — currently decodes without signature verification.
+   Needs jwks-rsa package for production. Scaffold code in docs/CONNECTING_REAL_APIS.md.
+
+4. Real Jira API calls — set JIRA_MOCK=false + JIRA_API_TOKEN + JIRA_USER_EMAIL.
+   The JQL query and response transform are already written in jira.routes.ts.
+   Custom team field mapping: update fields.customfield_team if your org uses a different field ID.
+
+5. Real Copado API calls — set COPADO_MOCK=false + Connected App credentials.
+   See docs/CONNECTING_REAL_APIS.md section 2 for Salesforce Connected App setup.
+
+6. Background auto-sync cron job — node-cron is installed and imported in server.ts but the
+   schedule is not enabled. Should call jira sync every 30 minutes to keep data fresh.
+
+7. File upload for defect screenshots — screenshotUrl field exists on the Defect embedded model.
+   The UI has a drop zone placeholder. Needs an S3 or Azure Blob upload endpoint.
+
+8. Email notifications — AdminRequest approval/denial should email the requester.
+   Cert completion should notify the Release Manager. No email service is wired yet.
+
+
+== DOCUMENTATION FILES (in releaseiq-microservice/docs/) ==
+
+ARCHITECTURE.md         Mermaid system diagrams, sequence diagrams, ER diagram, environment flow,
+                        full API table — use for manager presentations
+
+FEATURES.md             Every feature explained with data flow and exact code file locations.
+                        Read this before modifying any feature.
+
+SETUP.md                Detailed local setup guide with troubleshooting for common failures.
+
+CONNECTING_REAL_APIS.md Step-by-step instructions for Jira, Copado, and Azure AD integration.
+                        Contains exact code scaffolds for production wiring.
+
+
+== RULES FOR THIS CHAT ==
+
+1. Before modifying any feature, read the relevant section of FEATURES.md first.
+
+2. Always import shared UI from @/common/ — never write inline Button or Badge components
+   inside apps/. If a new reusable component is needed, add it to common/ first.
+
+3. Never add auth to GET /api/certifications/:sessionId/resume or the /cert/:sessionId route.
+   This must remain public. It is intentional by design (see design decision 1).
+
+4. Always follow the existing error handling pattern: withRetry -> ErrorLog -> stale data fallback.
+   Do not add try/catch that swallows errors silently.
+
+5. Use the established React Query cache key convention (listed above). If adding a new query,
+   follow the pattern ['entity', ...params].
+
+6. When adding a new UI component that will be reused across features, put it in common/.
+   When adding a component that belongs to exactly one feature, put it in that feature's
+   components/ subfolder.
+
+7. The microservice config is read from .env.{NODE_ENV} automatically. Never hardcode
+   environment-specific values. Always use config.X from src/config/index.ts.
+
+8. When connecting real Jira or Copado APIs, change only the mock=false branch in the routes.
+   The mock branch should remain intact as a fallback for local development.
